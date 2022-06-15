@@ -1,0 +1,152 @@
+policies:
+  - type: "AssignMessage"
+    id: "AM-bq-request"
+    assign_to:
+      message_type: "request"
+      transport: "http"
+      create_new: true
+    set:
+      payload:
+        content_type: "application/json"
+        variable_prefix: "@"
+        variable_suffix: "+"
+        body: >
+          {
+            "kind": "bigquery#queryRequest",
+            "query": "SELECT name FROM test.contacts",
+            "useQueryCache": true,
+            "useLegacySql": false
+          }
+      verb: "POST"
+  - type: "AssignMessage"
+    id: "AM-configure-defaults"
+    ignore_unresolved_variables: true
+    remove:
+      queryparams:
+        - "fields"
+        - "offset"
+        - "limit"
+    assign_variables:
+      - variable: "data.request.limit"
+        from_variable: "request.queryparam.limit"
+        default_value: "2"
+      - variable: "data.request.offset"
+        from_variable: "request.queryparam.offset"
+        default_value: "0"
+      - variable: "data.request.fields"
+        from_variable: "request.queryparam.fields"
+        default_value: "*"
+  - type: "CORS"
+    id: "CO-cors-headers"
+    allow_origins:
+      template: "{request.header.origin}"
+    allow_methods:
+      template: "GET"
+    allow_headers:
+      template: "origin, x-requested-with, accept, content-type"
+    expose_headers:
+      template: "*"
+    max_age: 3628800
+    allow_credentials: false
+    generate_preflight_response: true
+    ignore_unresolved_variables: true
+  - type: "Javascript"
+    id: "JS-bq-response"
+    resource_url: "jsc://bq-response.js"
+  - type: "RegularExpressionProtection"
+    id: "RE-injection-protection"
+    ignore_unresolved_variables: true
+    xml_payload:
+      namespaces:
+        - prefix: "web"
+      xpaths:
+        - patterns:
+            - "1.01"
+            - "2.05"
+            - "3.05"
+          expression: "/soap11env:Envelope/soap11env:Body/web:FindCountryAsXml/web:V4IPAddress"
+          type: "float"
+        - patterns:
+            - "2346.05"
+          expression: "/soap11env:Envelope/soap11env:Body/web:FindCountryAsXml/web:V4IPAddress"
+          type: "float"
+    json_payload:
+      json_paths:
+        - patterns:
+            - "2346.05"
+          expression: "/soap11env:Envelope/soap11env:Body/web:FindCountryAsXml/web:V4IPAddress"
+        - patterns:
+            - "2346.05"
+          expression: "/soap11env:Envelope/soap11env:Body/web:FindCountryAsXml/web:V4IPAddress"
+    query_param_match:
+      - name: "limit"
+        patterns:
+          - "[^0-9]"
+          - "[^a-b]"
+      - name: "offset"
+        patterns:
+          - "[^0-9]"
+      - name: "fields"
+        patterns:
+          - '[\s]*((delete)|(exec)|(drop\s*table)|(insert)|(shutdown)|(update)|(\bor\b))'
+  - type: "RaiseFault"
+    id: "RF-internal-error"
+    display_name: " Raise internal Error"
+    fault_response:
+      set:
+        payload:
+          content_type: "application/json"
+          body: '{"error":"internal_error"}'
+        status_code: 500
+        status_message: "Internal Error"
+  - type: "RaiseFault"
+    id: "RF-invalid-request"
+    fault_response:
+      set:
+        payload:
+          content_type: "application/json"
+          body: '{"error":"invalid_request"}'
+        status_code: 400
+        status_message: "Bad Request"
+targets:
+  - id: "bigquery"
+    pre_flow:
+      on_request:
+        steps:
+          - id: "AM-bq-request"
+      on_response:
+        steps:
+          - id: "JS-bq-response"
+    http_connection:
+      url: "https://www.googleapis.com/bigquery/v2/projects/apigee-hybrid-edgeperf/queries"
+      authentication:
+        google_access_token:
+          scopes:
+            - "https://www.googleapis.com/auth/bigquery"
+proxies:
+  - id: "default"
+    pre_flow:
+      on_request:
+        steps:
+          - id: "RE-injection-protection"
+          - id: "AM-configure-defaults"
+          - id: "RF-invalid-request"
+            when: "data.request.limit > 100"
+          - id: "CO-cors-headers"
+    proxy_connection:
+      base_path: "/bq"
+    default_fault_rule:
+      steps:
+        - id: "CO-cors-headers"
+        - id: "RF-internal-error"
+          when: 'fault.name != "RaiseFault"'
+    fault_rules:
+      - when: '(fault.name = "ThreatDetected")'
+        steps:
+          - id: "CO-cors-headers"
+          - id: "RF-invalid-request"
+    routes:
+      - id: "bigquery"
+        when: 'request.verb = "GET"'
+        target_endpoint: "bigquery"
+      - id: "no-op"
